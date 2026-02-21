@@ -28,6 +28,8 @@ const DIRECTIVES = new Set([
   'include',
   'islands',
   'csrf',
+  'class',
+  'style',
 ])
 
 export function tokenize(source: string): Token[] {

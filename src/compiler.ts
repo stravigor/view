@@ -21,6 +21,72 @@ function escapeJs(str: string): string {
     .replace(/\t/g, '\\t')
 }
 
+/**
+ * Parse a conditional array like `['p-4', 'bold' => isActive, 'dim' => !isActive]`.
+ * Returns an array of JS expressions:
+ *   - plain entries stay as-is: `'p-4'`
+ *   - `'value' => condition` becomes `(condition) ? 'value' : ''`
+ */
+function parseConditionalArray(args: string): string[] {
+  // Strip outer whitespace and brackets: "[ ... ]" → "..."
+  let inner = args.trim()
+  if (inner.startsWith('[') && inner.endsWith(']')) {
+    inner = inner.slice(1, -1)
+  }
+
+  // Split by top-level commas (respect quotes, parens, brackets)
+  const entries: string[] = []
+  let current = ''
+  let depth = 0      // ( )
+  let bracketDepth = 0 // [ ]
+  let inSingle = false
+  let inDouble = false
+  let inBacktick = false
+
+  for (let i = 0; i < inner.length; i++) {
+    const ch = inner[i]!
+    const prev = i > 0 ? inner[i - 1] : ''
+
+    if (prev !== '\\') {
+      if (ch === "'" && !inDouble && !inBacktick) inSingle = !inSingle
+      else if (ch === '"' && !inSingle && !inBacktick) inDouble = !inDouble
+      else if (ch === '`' && !inSingle && !inDouble) inBacktick = !inBacktick
+    }
+
+    const inString = inSingle || inDouble || inBacktick
+
+    if (!inString) {
+      if (ch === '(') depth++
+      else if (ch === ')') depth--
+      else if (ch === '[') bracketDepth++
+      else if (ch === ']') bracketDepth--
+      else if (ch === ',' && depth === 0 && bracketDepth === 0) {
+        entries.push(current.trim())
+        current = ''
+        continue
+      }
+    }
+
+    current += ch
+  }
+
+  const last = current.trim()
+  if (last) entries.push(last)
+
+  // Transform each entry
+  return entries.map(entry => {
+    // Match: 'value' => condition  or  "value" => condition
+    const arrowMatch = entry.match(/^(['"])(.*?)\1\s*=>\s*(.+)$/)
+    if (arrowMatch) {
+      const value = arrowMatch[1]! + arrowMatch[2]! + arrowMatch[1]!
+      const condition = arrowMatch[3]!.trim()
+      return `(${condition}) ? ${value} : ''`
+    }
+    // Plain expression — pass through
+    return entry
+  })
+}
+
 export function compile(tokens: Token[]): CompilationResult {
   const lines: string[] = []
   const stack: StackEntry[] = []
@@ -183,6 +249,22 @@ function compileDirective(
       lines.push(
         `__out += '<script src="' + (typeof __islandsSrc !== 'undefined' ? __islandsSrc : '${escapeJs(src)}') + '"><\\/script>';`
       )
+      break
+    }
+
+    case 'class': {
+      if (!token.args) throw new TemplateError(`@class requires arguments at line ${token.line}`)
+      const classEntries = parseConditionalArray(token.args)
+      const classExpr = `[${classEntries.join(', ')}].filter(Boolean).join(' ')`
+      lines.push(`__out += 'class="' + __escape(${classExpr}) + '"';`)
+      break
+    }
+
+    case 'style': {
+      if (!token.args) throw new TemplateError(`@style requires arguments at line ${token.line}`)
+      const styleEntries = parseConditionalArray(token.args)
+      const styleExpr = `[${styleEntries.join(', ')}].filter(Boolean).join('; ')`
+      lines.push(`__out += 'style="' + __escape(${styleExpr}) + '"';`)
       break
     }
 

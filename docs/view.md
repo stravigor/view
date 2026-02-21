@@ -94,6 +94,42 @@ Inside loops, these variables are available automatically:
 @end
 ```
 
+### Conditional classes
+
+Build a `class` attribute with conditional entries. Plain strings are always included; entries with `=>` are included only when the condition is truthy.
+
+```html
+<span @class([
+    'p-4',
+    'font-bold' => isActive,
+    'text-gray-500' => !isActive,
+    'bg-red' => hasError,
+])></span>
+```
+
+When `isActive` is `true` and `hasError` is `false`, this renders:
+
+```html
+<span class="p-4 font-bold"></span>
+```
+
+### Conditional styles
+
+Works the same as `@class` but outputs a `style` attribute, joining entries with `; `.
+
+```html
+<span @style([
+    'background-color: red',
+    'font-weight: bold' => isActive,
+])></span>
+```
+
+When `isActive` is `true`:
+
+```html
+<span style="background-color: red; font-weight: bold"></span>
+```
+
 ### CSRF
 
 Output a hidden CSRF token input inside forms:
