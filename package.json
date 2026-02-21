@@ -1,0 +1,26 @@
+{
+  "name": "@stravigor/view",
+  "version": "0.5.6",
+  "type": "module",
+  "description": "View layer for the Strav framework — template engine, Vue SFC islands, and SPA client router",
+  "license": "MIT",
+  "keywords": ["bun", "framework", "typescript", "strav", "view", "template", "vue", "islands"],
+  "files": ["src/", "package.json", "tsconfig.json", "CHANGELOG.md"],
+  "exports": {
+    ".": "./src/index.ts",
+    "./client/*": "./src/client/*.ts",
+    "./islands/*": "./src/islands/*.ts"
+  },
+  "peerDependencies": {
+    "@stravigor/kernel": "workspace:*",
+    "@stravigor/http": "workspace:*",
+    "vue": "^3.5.0"
+  },
+  "dependencies": {
+    "@vue/compiler-sfc": "^3.5.28"
+  },
+  "scripts": {
+    "test": "bun test tests/",
+    "typecheck": "tsc --noEmit"
+  }
+}
