@@ -1,4 +1,4 @@
-import { resolve, join } from 'node:path'
+import { resolve, join, dirname, basename } from 'node:path'
 import {
   readdirSync,
   existsSync,
@@ -11,6 +11,17 @@ import { brotliCompressSync, constants as zlibConstants } from 'node:zlib'
 import { vueSfcPlugin } from './vue_plugin.ts'
 import ViewEngine from '../engine.ts'
 import type { BunPlugin } from 'bun'
+
+export interface CssOptions {
+  /** Sass entry file path. e.g. 'resources/css/app.scss' */
+  entry: string
+  /** Output filename. Default: derived from entry (app.scss → app.css) */
+  outFile?: string
+  /** Output directory. Default: './public/css' */
+  outDir?: string
+  /** Base URL path for the CSS file. Default: '/css/' */
+  basePath?: string
+}
 
 export interface IslandBuilderOptions {
   /** Directory containing .vue SFC files. Default: './resources/islands' */
@@ -25,6 +36,8 @@ export interface IslandBuilderOptions {
   compress?: boolean
   /** Base URL path for the islands script. Default: '/builds/' */
   basePath?: string
+  /** Sass CSS compilation options. Requires `sass` package as a peer dependency. */
+  css?: CssOptions
 }
 
 export interface IslandManifest {
@@ -44,8 +57,11 @@ export class IslandBuilder {
   private compress: boolean
   private basePath: string
   private watcher: FSWatcher | null = null
+  private cssWatcher: FSWatcher | null = null
   private _version: string | null = null
   private _manifest: IslandManifest | null = null
+  private cssOpts: { entry: string; outFile: string; outDir: string; basePath: string } | null = null
+  private _cssVersion: string | null = null
 
   constructor(options: IslandBuilderOptions = {}) {
     this.islandsDir = resolve(options.islandsDir ?? './resources/islands')
@@ -54,6 +70,15 @@ export class IslandBuilder {
     this.minify = options.minify ?? Bun.env.NODE_ENV === 'production'
     this.compress = options.compress ?? true
     this.basePath = options.basePath ?? '/builds/'
+
+    if (options.css) {
+      this.cssOpts = {
+        entry: resolve(options.css.entry),
+        outFile: options.css.outFile ?? basename(options.css.entry).replace(/\.scss$/, '.css'),
+        outDir: resolve(options.css.outDir ?? './public/css'),
+        basePath: options.css.basePath ?? '/css/',
+      }
+    }
   }
 
   /** The content hash of the last build, or null if not yet built. */
@@ -70,6 +95,13 @@ export class IslandBuilder {
   /** The build manifest with file info and sizes, or null if not yet built. */
   get manifest(): IslandManifest | null {
     return this._manifest
+  }
+
+  /** The versioned CSS src (e.g. '/css/app.css?v=abc12345'), or null if CSS is not configured. */
+  get cssSrc(): string | null {
+    if (!this.cssOpts) return null
+    const base = this.cssOpts.basePath + this.cssOpts.outFile
+    return this._cssVersion ? `${base}?v=${this._cssVersion}` : base
   }
 
   /** Discover all .vue files in the islands directory (recursively). */
@@ -218,9 +250,51 @@ export class IslandBuilder {
   private syncViewEngine(): void {
     try {
       ViewEngine.setGlobal('__islandsSrc', this.src)
+      if (this.cssSrc) {
+        ViewEngine.setGlobal('__cssSrc', this.cssSrc)
+      }
     } catch {
       // ViewEngine may not be initialized yet
     }
+  }
+
+  /** Compile Sass entry to CSS. */
+  async buildCss(): Promise<void> {
+    if (!this.cssOpts) return
+
+    const sass = await import('sass')
+    const result = sass.compile(this.cssOpts.entry, {
+      style: this.minify ? 'compressed' : 'expanded',
+    })
+
+    mkdirSync(this.cssOpts.outDir, { recursive: true })
+    const outPath = join(this.cssOpts.outDir, this.cssOpts.outFile)
+    await Bun.write(outPath, result.css)
+
+    const content = new Uint8Array(Buffer.from(result.css))
+    this._cssVersion = this.computeHash(content)
+
+    let compressedSizes: { gzip?: number; brotli?: number } = {}
+    if (this.compress) {
+      compressedSizes = await this.generateCompressed(outPath, content)
+    } else {
+      this.cleanCompressed(outPath)
+    }
+
+    this.syncViewEngine()
+
+    const entryName = basename(this.cssOpts.entry)
+    const sizeKB = (content.length / 1024).toFixed(1)
+    const gzKB = compressedSizes.gzip
+      ? ` | gzip: ${(compressedSizes.gzip / 1024).toFixed(1)}kB`
+      : ''
+    const brKB = compressedSizes.brotli
+      ? ` | br: ${(compressedSizes.brotli / 1024).toFixed(1)}kB`
+      : ''
+
+    console.log(
+      `[css] Built ${entryName} → ${this.cssOpts.outFile} (${sizeKB}kB${gzKB}${brKB}) v=${this._cssVersion}`
+    )
   }
 
   /** Build the islands bundle. Returns true if islands were found and built. */
@@ -228,6 +302,8 @@ export class IslandBuilder {
     const islands = this.discoverIslands()
 
     if (islands.length === 0) {
+      // Still build CSS even if there are no islands
+      await this.buildCss()
       return false
     }
 
@@ -313,30 +389,49 @@ export class IslandBuilder {
     console.log(
       `[islands] Built ${islands.length} component(s) → ${this.outFile} (${sizeKB}kB${gzKB}${brKB}) v=${this._version}`
     )
+
+    // Build CSS if configured
+    await this.buildCss()
+
     return true
   }
 
   /** Watch the islands directory and rebuild on changes. */
   watch(): void {
-    if (this.watcher) return
+    if (!this.watcher) {
+      // Only build if not already built (avoids duplicate Bun.build() in same process)
+      if (!this._version) {
+        this.build().catch(err => console.error('[islands] Build error:', err))
+      }
 
-    // Only build if not already built (avoids duplicate Bun.build() in same process)
-    if (!this._version) {
-      this.build().catch(err => console.error('[islands] Build error:', err))
+      this.watcher = fsWatch(this.islandsDir, { recursive: true }, (_event, filename) => {
+        if (filename && !filename.endsWith('.vue') && !filename.startsWith('setup.')) return
+        console.log('[islands] Change detected, rebuilding...')
+        this.build().catch(err => console.error('[islands] Rebuild error:', err))
+      })
+
+      console.log(`[islands] Watching ${this.islandsDir}`)
     }
 
-    this.watcher = fsWatch(this.islandsDir, { recursive: true }, (_event, filename) => {
-      if (filename && !filename.endsWith('.vue') && !filename.startsWith('setup.')) return
-      console.log('[islands] Change detected, rebuilding...')
-      this.build().catch(err => console.error('[islands] Rebuild error:', err))
-    })
+    // Watch CSS source directory
+    if (this.cssOpts && !this.cssWatcher) {
+      const cssDir = dirname(this.cssOpts.entry)
 
-    console.log(`[islands] Watching ${this.islandsDir}`)
+      this.cssWatcher = fsWatch(cssDir, { recursive: true }, (_event, filename) => {
+        if (filename && !filename.endsWith('.scss') && !filename.endsWith('.css')) return
+        console.log('[css] Change detected, recompiling...')
+        this.buildCss().catch(err => console.error('[css] Build error:', err))
+      })
+
+      console.log(`[css] Watching ${cssDir}`)
+    }
   }
 
   /** Stop watching. */
   unwatch(): void {
     this.watcher?.close()
     this.watcher = null
+    this.cssWatcher?.close()
+    this.cssWatcher = null
   }
 }

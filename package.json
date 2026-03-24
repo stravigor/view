@@ -1,6 +1,6 @@
 {
   "name": "@stravigor/view",
-  "version": "0.5.6",
+  "version": "0.5.9",
   "type": "module",
   "description": "View layer for the Strav framework — template engine, Vue SFC islands, and SPA client router",
   "license": "MIT",
@@ -14,10 +14,17 @@
   "peerDependencies": {
     "@stravigor/kernel": "workspace:*",
     "@stravigor/http": "workspace:*",
-    "vue": "^3.5.0"
+    "vue": "^3.5.0",
+    "sass": "^1.80.0"
+  },
+  "peerDependenciesMeta": {
+    "sass": { "optional": true }
   },
   "dependencies": {
     "@vue/compiler-sfc": "^3.5.28"
+  },
+  "devDependencies": {
+    "sass": "^1.80.0"
   },
   "scripts": {
     "test": "bun test tests/",
